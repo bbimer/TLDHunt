@@ -17,6 +17,8 @@ nreg=false
 update_tld=false
 tld_file="tlds.txt"
 tld_url="https://data.iana.org/TLD/tlds-alpha-by-domain.txt"
+output_file=""
+domains_file=""
 
 # Check if whois is installed
 command -v whois &> /dev/null || { echo "whois not installed. You must install whois to use this tool." >&2; exit 1; }
@@ -34,9 +36,13 @@ cat << "EOF"
 EOF
 
 usage() {
-    echo "Usage: $0 -k <keyword> [-e <tld> | -E <tld-file>] [-x] [--update-tld]"
-    echo "Example: $0 -k linuxsec -E tlds.txt"
-    echo "       : $0 --update-tld"
+    echo "Usage: $0 -k <keyword> [-e <tld> | -E <tld-file>] [-x] [-o <output-file>] [--update-tld]"
+    echo "       $0 -d <domains-file> [-x] [-o <output-file>]"
+    echo ""
+    echo "Examples:"
+    echo "  $0 -k linuxsec -E tlds.txt -o results.txt"
+    echo "  $0 -d domains.txt -o results.txt"
+    echo "  $0 --update-tld"
     exit 1
 }
 
@@ -47,6 +53,8 @@ while [[ "$#" -gt 0 ]]; do
         -e|--tld) tld="$2"; shift ;;
         -E|--tld-file) exts="$2"; shift ;;
         -x|--not-registered) nreg=true ;;
+        -o|--output) output_file="$2"; shift ;;
+        -d|--domains-file) domains_file="$2"; shift ;;
         --update-tld) update_tld=true ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
     esac
@@ -65,19 +73,47 @@ if [[ "$update_tld" = true ]]; then
     exit 0
 fi
 
-# Validate arguments
-[[ -z $keyword ]] && { echo "Keyword is required."; usage; }
-[[ -n $tld && -n $exts ]] && { echo "You can only specify one of -e or -E options."; usage; }
-[[ -z $tld && -z $exts ]] && { echo "Either -e or -E option is required."; usage; }
-[[ -n $exts && ! -f $exts ]] && { echo "TLD file $exts not found."; usage; }
-
-# Load TLDs
-tlds=()
-if [[ -n $exts ]]; then
-    readarray -t tlds < "$exts"
+# Mode: domains file (full domains list)
+if [[ -n $domains_file ]]; then
+    [[ ! -f $domains_file ]] && { echo "Domains file $domains_file not found."; exit 1; }
+    [[ -n $keyword || -n $tld || -n $exts ]] && { echo "-d cannot be used with -k, -e, or -E options."; usage; }
+    
+    readarray -t domains < "$domains_file"
 else
-    tlds=("$tld")
+    # Mode: keyword + TLD
+    [[ -z $keyword ]] && { echo "Keyword is required (or use -d for domains file)."; usage; }
+    [[ -n $tld && -n $exts ]] && { echo "You can only specify one of -e or -E options."; usage; }
+    [[ -z $tld && -z $exts ]] && { echo "Either -e or -E option is required."; usage; }
+    [[ -n $exts && ! -f $exts ]] && { echo "TLD file $exts not found."; usage; }
+
+    # Load TLDs and build domains
+    tlds=()
+    if [[ -n $exts ]]; then
+        readarray -t tlds < "$exts"
+    else
+        tlds=("$tld")
+    fi
+    
+    domains=()
+    for ext in "${tlds[@]}"; do
+        domains+=("$keyword$ext")
+    done
 fi
+
+# Initialize output file if specified
+if [[ -n $output_file ]]; then
+    > "$output_file"
+fi
+
+# Function to write output
+write_output() {
+    local message="$1"
+    local plain_message="$2"
+    echo -e "$message"
+    if [[ -n $output_file ]]; then
+        echo "$plain_message" >> "$output_file"
+    fi
+}
 
 # Function to check domain availability
 check_domain() {
@@ -92,22 +128,30 @@ check_domain() {
             local expiry_date
             expiry_date=$(echo "$whois_output" | grep -iE "Expiry Date|Expiration Date|Registry Expiry Date|Expiration Time" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}' | uniq)
             if [[ -n $expiry_date ]]; then
-                echo -e "[${b_red}taken${reset}] $domain - Exp Date: ${orange}$expiry_date${reset}"
+                write_output "[${b_red}taken${reset}] $domain - Exp Date: ${orange}$expiry_date${reset}" "[taken] $domain - Exp Date: $expiry_date"
             else
-                echo -e "[${b_red}taken${reset}] $domain - No expiry date found"
+                write_output "[${b_red}taken${reset}] $domain - No expiry date found" "[taken] $domain - No expiry date found"
             fi
         fi
     else
-        echo -e "[${b_green}avail${reset}] $domain"
+        write_output "[${b_green}avail${reset}] $domain" "[avail] $domain"
     fi
 }
 
-# Process TLDs
-for ext in "${tlds[@]}"; do
-    domain="$keyword$ext"
+# Process domains
+echo "Checking ${#domains[@]} domains..."
+[[ -n $output_file ]] && echo "Results will be saved to: $output_file"
+echo ""
+
+for domain in "${domains[@]}"; do
+    [[ -z $domain ]] && continue
     check_domain "$domain" &
     if (( $(jobs -r -p | wc -l) >= 30 )); then
         wait -n
     fi
 done
 wait
+
+echo ""
+echo "Done! Checked ${#domains[@]} domains."
+[[ -n $output_file ]] && echo "Results saved to: $output_file"
